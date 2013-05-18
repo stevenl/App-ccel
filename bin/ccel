@@ -1,0 +1,102 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Getopt::Long::Descriptive;
+#use HTML::Tidy ();
+use Mojo::DOM ();
+use Mojo::URL ();
+use Mojo::UserAgent ();
+
+use constant URL => 'http://www.ccel.org/ccel/';
+
+my ($opts, $usage) = describe_options(
+    '%c %o',
+    [ 'help|h',     'print usage message and exit', {implies => [qw(author title)]} ],
+    [ 'author|a=s', 'author of the book', {required => 1} ],
+    [ 'title|t=s',  'title of the book',  {required => 1} ],
+);
+if ($opts->help) {
+    print $usage->text;
+    exit;
+}
+
+my $ua  = Mojo::UserAgent->new;
+my $url = Mojo::URL->new(URL);
+
+my $output_dir = "$opts->{author}-$opts->{title}";
+mkdir $output_dir;
+chdir $output_dir;
+
+# download book
+{
+    my $toc_url = $url->path("$opts->{author}/$opts->{title}.toc.html");
+
+    print "Downloading book $toc_url\n";
+
+    my $tx = $ua->get($toc_url);
+    if (! $tx->success) {
+        my ($err, $code) = $tx->error;
+        die "$err: $toc_url";
+    }
+    my $toc = $tx->res->dom;
+
+    open my $fh, '>', "$opts->{author}-$opts->{title}.html";
+
+    $toc = $toc->find('div[id="content-lunchmeat"]')->first;
+
+    foreach ($toc->find('a[class="TOC"]')->each) {
+        my $page_url = $toc_url->path( $_->attrs('href') );
+
+        my $page = $ua->get($page_url)->res->dom;
+        $page = $page->find('div[class="book-content"]')->first;
+
+        # fix headers
+        $page->find('h2')->each(sub {
+            my ($e) = @_;
+            my ($section_id)  = split '-', $e->attrs('id');
+            my @section_parts = split '\.', $section_id;
+
+            $e->type('h1') if @section_parts == 1; # top-level section
+        });
+        $page->find('h1')->each(sub {
+            my ($e) = @_;
+            warn $e->text, "\n";
+            $e->attrs(class => 'chapter');
+        });
+
+        # remove page numbers
+        $page->find('span[class="pb"]')->each(sub { shift->remove });
+        # replace <i> with <em>
+        $page->find('i')->each(sub { shift->type('em') });
+        # replace <b> with <strong>
+        $page->find('b')->each(sub { shift->type('strong') });
+
+        # remove javascript mouseover popups
+        $page->find('a[class="scripRef"]')->each(sub { $_[0]->replace($_[0]->text) });
+        # remove redundant superscripts
+        $page->find('span[class="mnote"]')->each(sub { shift->remove });
+
+        print $fh $page->to_xml, "\n";
+        #print $tidy->clean( $page->to_xml );
+    }
+
+    close $fh;
+}
+
+# download cover image
+{
+    my $img_url = Mojo::URL->new(URL)->path("$opts->{author}/$opts->{title}/files/$opts->{title}.jpg");
+
+    print "Downloading cover image $img_url\n";
+
+    my $tx = $ua->get($img_url);
+    if ($tx->success) {
+        $tx->res->content->asset->move_to('cover.jpg');
+    }
+    else {
+        my ($err, $code) = $tx->error;
+        die "$err: $img_url";
+    }
+}
